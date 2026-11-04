@@ -1,0 +1,488 @@
+blueprint:
+  name: EV charging by grid voltage (weak grid / ATR limit)
+  description: >
+    Adjusts the EV charger current automatically based on the grid voltage and grid import,
+    for homes on a weak grid (undervoltage, inverter disconnects) and/or with a contracted
+    power limit (ATR). Optional home battery support: the battery can help the car down to a
+    set SOC, then the current is capped so the grid import does not jump over the limit.
+
+
+    **How it works**
+
+    - When the car is plugged in: (optionally) runs your "on connect" actions, sets the start
+      current and switches the charger on.
+
+    - Current moves on fixed steps (e.g. 6,8,10,13,16,20 A, use only values your charger accepts).
+
+    - Step UP when voltage stays above the "up" threshold for N minutes, the last change was at
+      least M minutes ago and the grid import after the step stays below the import limit.
+
+    - Step DOWN when voltage stays below the "down" threshold for 30 s, or the import exceeds the
+      hard import limit for 15 s.
+
+    - EMERGENCY: grid lost (optional binary sensor) or voltage below the emergency threshold for
+      30 s → minimum current. From there it only climbs back step by step (normal step-up rule),
+      to avoid repeated inverter disconnects on a weak grid.
+
+    - Home battery at/below the cap SOC → current capped (optional).
+
+    - Watchdog: if the charger switch is on but the charger reports pause/wait/fault, it is
+      restarted. It never switches the charger on if you switched it off yourself.
+
+    - When the car is unplugged / finished: sets the "after session" current and runs your
+      "on disconnect" actions (e.g. restore inverter battery settings).
+
+
+    Made for a DEYE inverter (Solarman) + Tuya/Navo charger, but works with any entities of the
+    same type. Grid power sensor must be positive when importing.
+  domain: automation
+  input:
+    entities:
+      name: Entities
+      icon: mdi:ev-station
+      input:
+        grid_voltage:
+          name: Grid voltage sensor (V)
+          selector:
+            entity:
+              domain: sensor
+        grid_power:
+          name: Grid power sensor (W, positive = import)
+          selector:
+            entity:
+              domain: sensor
+        grid_connected:
+          name: Grid connected binary sensor (optional)
+          description: "On = inverter connected to grid. Leave empty if you don't have one."
+          default: ""
+          selector:
+            entity:
+              domain: binary_sensor
+        home_battery_soc:
+          name: Home battery SOC sensor (%) (optional)
+          default: ""
+          selector:
+            entity:
+              domain: sensor
+        charger_current:
+          name: Charger current (number entity, A)
+          selector:
+            entity:
+              domain: number
+        charger_switch:
+          name: Charger on/off switch
+          selector:
+            entity:
+              domain: switch
+        charger_status:
+          name: Charger status sensor
+          selector:
+            entity:
+              domain: sensor
+    charger_states:
+      name: Charger status values
+      icon: mdi:list-status
+      collapsed: true
+      input:
+        status_charging:
+          name: Status when charging
+          default: charger_charging
+          selector:
+            text:
+        status_connected:
+          name: Status when plugged in (not charging)
+          default: charger_insert
+          selector:
+            text:
+        status_disconnected:
+          name: Status when unplugged
+          default: charger_free
+          selector:
+            text:
+        status_finished:
+          name: Status when charging finished
+          default: charger_end
+          selector:
+            text:
+        status_faults:
+          name: Status values that should be restarted (comma separated)
+          default: charger_pause,charger_wait,charger_free_fault,charger_fault
+          selector:
+            text:
+    currents:
+      name: Currents
+      icon: mdi:current-ac
+      input:
+        current_steps:
+          name: Allowed current steps (A, comma separated, ascending)
+          default: "6,8,10,13,16,20"
+          selector:
+            text:
+        auto_start:
+          name: Switch the charger on automatically when the car is plugged in
+          default: true
+          selector:
+            boolean:
+        start_current_battery:
+          name: Start current when home battery is above the "battery helps" SOC
+          default: 24
+          selector:
+            number:
+              min: 6
+              max: 32
+              unit_of_measurement: A
+        start_current:
+          name: Start current otherwise
+          default: 10
+          selector:
+            number:
+              min: 6
+              max: 32
+              unit_of_measurement: A
+        after_session_current:
+          name: Current to set after the session ends
+          default: 24
+          selector:
+            number:
+              min: 6
+              max: 32
+              unit_of_measurement: A
+    thresholds:
+      name: Thresholds
+      icon: mdi:sine-wave
+      input:
+        up_voltage:
+          name: Step up above (V)
+          default: 218
+          selector:
+            number:
+              min: 200
+              max: 240
+              unit_of_measurement: V
+        up_minutes:
+          name: Voltage must stay above for (min)
+          default: 5
+          selector:
+            number:
+              min: 1
+              max: 30
+              unit_of_measurement: min
+        min_minutes_between_up:
+          name: Minimum minutes since the last change before stepping up
+          default: 10
+          selector:
+            number:
+              min: 1
+              max: 60
+              unit_of_measurement: min
+        down_voltage:
+          name: Step down below (V, for 30 s)
+          default: 205
+          selector:
+            number:
+              min: 180
+              max: 230
+              unit_of_measurement: V
+        emergency_voltage:
+          name: Emergency (minimum current) below (V, for 30 s)
+          default: 198
+          selector:
+            number:
+              min: 180
+              max: 225
+              unit_of_measurement: V
+        import_up_limit:
+          name: Step up only if import after the step stays below (W)
+          default: 4500
+          selector:
+            number:
+              min: 1000
+              max: 30000
+              step: 100
+              unit_of_measurement: W
+        import_hard_limit:
+          name: Step down if import above (W, for 15 s) – e.g. ATR limit minus margin
+          default: 4700
+          selector:
+            number:
+              min: 1000
+              max: 30000
+              step: 100
+              unit_of_measurement: W
+    battery:
+      name: Home battery (optional)
+      icon: mdi:home-battery
+      collapsed: true
+      input:
+        battery_helps_soc:
+          name: Use the higher start current if battery SOC above (%)
+          default: 45
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+        battery_cap_soc:
+          name: Cap the car current when battery SOC drops below (%)
+          default: 41.5
+          selector:
+            number:
+              min: 0
+              max: 100
+              step: 0.5
+              unit_of_measurement: "%"
+        battery_cap_current:
+          name: Car current cap when battery is low (A)
+          default: 13
+          selector:
+            number:
+              min: 6
+              max: 32
+              unit_of_measurement: A
+    extras:
+      name: Notifications and extra actions
+      icon: mdi:bell
+      collapsed: true
+      input:
+        notify_service:
+          name: Notify service (e.g. notify.mobile_app_my_phone), empty = no notifications
+          default: ""
+          selector:
+            text:
+        on_connect_actions:
+          name: Extra actions when the car is plugged in
+          description: e.g. set inverter TOU SOC to 40% and disable grid charging
+          default: []
+          selector:
+            action: {}
+        on_disconnect_actions:
+          name: Extra actions when the session ends
+          description: e.g. restore inverter TOU settings
+          default: []
+          selector:
+            action: {}
+
+mode: single
+max_exceeded: silent
+
+trigger_variables:
+  grid_bin: !input grid_connected
+  soc_ent: !input home_battery_soc
+  cap_soc: !input battery_cap_soc
+
+triggers:
+  - trigger: template
+    value_template: "{{ grid_bin != '' and not is_state(grid_bin, 'on') }}"
+    id: urgent
+  - trigger: numeric_state
+    entity_id: !input grid_voltage
+    below: !input emergency_voltage
+    for:
+      seconds: 30
+    id: urgent
+  - trigger: numeric_state
+    entity_id: !input grid_voltage
+    below: !input down_voltage
+    for:
+      seconds: 30
+    id: down
+  - trigger: numeric_state
+    entity_id: !input grid_power
+    above: !input import_hard_limit
+    for:
+      seconds: 15
+    id: down
+  - trigger: template
+    value_template: "{{ soc_ent != '' and states(soc_ent) | float(100) < cap_soc | float(0) }}"
+    id: battery_low
+  - trigger: state
+    entity_id: !input charger_status
+    from: !input status_disconnected
+    to: !input status_connected
+    for:
+      seconds: 30
+    id: connected
+  - trigger: state
+    entity_id: !input charger_status
+    to:
+      - !input status_disconnected
+      - !input status_finished
+    for:
+      minutes: 2
+    id: finished
+  - trigger: time_pattern
+    minutes: /2
+    id: tick
+
+variables:
+  v_ent: !input grid_voltage
+  g_ent: !input grid_power
+  cur_ent: !input charger_current
+  sw_ent: !input charger_switch
+  st_ent: !input charger_status
+  steps_txt: !input current_steps
+  faults_txt: !input status_faults
+  st_charging: !input status_charging
+  notify_svc: !input notify_service
+  auto_start: !input auto_start
+  start_bat: !input start_current_battery
+  start_low: !input start_current
+  after_cur: !input after_session_current
+  up_v: !input up_voltage
+  up_min: !input up_minutes
+  gap_min: !input min_minutes_between_up
+  down_v: !input down_voltage
+  imp_up: !input import_up_limit
+  help_soc: !input battery_helps_soc
+  cap_cur: !input battery_cap_current
+  steps: "{{ steps_txt.split(',') | map('trim') | map('int') | list }}"
+  faults: "{{ faults_txt.split(',') | map('trim') | list }}"
+  a: "{{ states(cur_ent) | float(steps | first) }}"
+  v: "{{ states(v_ent) | float(0) }}"
+  g: "{{ states(g_ent) | float(0) }}"
+  soc: "{{ states(soc_ent) | float(100) if soc_ent != '' else 100 }}"
+  grid_ok: "{{ is_state(grid_bin, 'on') if grid_bin != '' else true }}"
+  charging_on: "{{ is_state(sw_ent, 'on') }}"
+  since_change: "{{ (now() - states[cur_ent].last_changed).total_seconds() if states[cur_ent] is not none else 99999 }}"
+  next_up: "{{ steps | select('gt', a | int) | first | default(steps | last) }}"
+  next_down: "{{ steps | select('lt', a | int) | list | last | default(steps | first) }}"
+  capped: "{{ soc_ent != '' and soc < cap_soc | float(0) }}"
+  max_now: "{{ [cap_cur, steps | last] | min if capped else steps | last }}"
+
+actions:
+  - choose:
+      # Car plugged in
+      - conditions:
+          - condition: trigger
+            id: connected
+        sequence:
+          - choose: []
+            default: !input on_connect_actions
+          - action: number.set_value
+            target:
+              entity_id: !input charger_current
+            data:
+              value: "{{ start_bat if (soc_ent != '' and soc > help_soc | float(0)) else start_low }}"
+          - if:
+              - condition: template
+                value_template: "{{ auto_start }}"
+            then:
+              - action: switch.turn_on
+                target:
+                  entity_id: !input charger_switch
+          - if:
+              - condition: template
+                value_template: "{{ notify_svc != '' }}"
+            then:
+              - action: "{{ notify_svc }}"
+                data:
+                  title: "EV plugged in"
+                  message: "Grid {{ v }} V, home battery {{ soc }}%. Charging current follows the grid voltage."
+
+      # Session finished / car unplugged
+      - conditions:
+          - condition: trigger
+            id: finished
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: !input charger_current
+            data:
+              value: "{{ after_cur }}"
+          - choose: []
+            default: !input on_disconnect_actions
+          - if:
+              - condition: template
+                value_template: "{{ notify_svc != '' }}"
+            then:
+              - action: "{{ notify_svc }}"
+                data:
+                  title: "EV session ended"
+                  message: "Status {{ states(st_ent) }}. Charger current reset to {{ after_cur }} A."
+
+      # Emergency: grid lost or very low voltage
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ charging_on and a > steps | first and
+                 (trigger.id == 'urgent' or not grid_ok) }}
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: !input charger_current
+            data:
+              value: "{{ steps | first }}"
+          - if:
+              - condition: template
+                value_template: "{{ notify_svc != '' }}"
+            then:
+              - action: "{{ notify_svc }}"
+                data:
+                  title: "EV at {{ steps | first }} A"
+                  message: "Grid connected: {{ grid_ok }}, voltage {{ v }} V, home battery {{ soc }}%."
+
+      # Home battery low: cap the current
+      - conditions:
+          - condition: template
+            value_template: "{{ charging_on and capped and a > cap_cur | float(0) }}"
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: !input charger_current
+            data:
+              value: "{{ cap_cur }}"
+
+      # Step down: low voltage or import over the hard limit
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ charging_on and grid_ok and trigger.id == 'down' and
+                 a > steps | first and since_change > 60 }}
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: !input charger_current
+            data:
+              value: "{{ next_down }}"
+
+      # Watchdog: switch is on but the charger reports pause/fault
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'tick' and charging_on and states(st_ent) in faults }}"
+        sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: !input charger_switch
+          - if:
+              - condition: template
+                value_template: "{{ notify_svc != '' }}"
+            then:
+              - action: "{{ notify_svc }}"
+                data:
+                  title: "EV charging restarted"
+                  message: "Charger status was {{ states(st_ent) }}."
+
+      # Step up: voltage stable above threshold and import stays under the limit
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.id == 'tick' and charging_on and grid_ok and is_state(st_ent, st_charging) and
+                 a < max_now | float(0) and v >= up_v | float(0) and
+                 since_change > gap_min | float(10) * 60 and
+                 g + (next_up | float(0) - a) * v < imp_up | float(0) }}
+        sequence:
+          - wait_template: >-
+              {{ states(v_ent) | float(0) < up_v | float(0) or
+                 (grid_bin != '' and not is_state(grid_bin, 'on')) }}
+            timeout:
+              minutes: "{{ up_min }}"
+            continue_on_timeout: true
+          - if:
+              - condition: template
+                value_template: "{{ not wait.completed }}"
+            then:
+              - action: number.set_value
+                target:
+                  entity_id: !input charger_current
+                data:
+                  value: "{{ [next_up | int, max_now | int] | min }}"
